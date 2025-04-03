@@ -1,0 +1,491 @@
+# TP3 : SE Linux
+
+##   1. Installation du système d’exploitation
+
+### 1.1 Installation de Rocky Linux 9 sans interface graphique
+
+Rocky-9.5-x86_64-minimal.iso
+
+### 1.2 Mise à jour avec les derniers correctifs
+
+utilisation de dnf update && dnf upgrade -y afin d'avoir le système à jour.
+
+## 2. Sécurisation de l’administration du serveur
+
+### 2.1 Renforcement de la configuration SSH
+
+Dans /etc/ssh/sshd_config nous décommentons et modifions les lignes :
+````
+    *PermitRootLogin no
+    *PasswordAuthentication no
+    *PubkeyAuthentication yes
+    *AllowUsers ladmin
+    *Port 2222
+````
+
+Cela interdit la connexion en ssh via mot de passe authorise le compte administrateur 'ladmin' à s'y connecter. Afin de suivre les préconisation de l'ANSSI, nous changeons le port ssh de base par le 2222.
+
+Nous relançons le service ssh
+````
+sudo systemctl restart sshd
+````
+
+Aucune clé n'est configurée dans ce tp, cela a été réalisé dans d'autre TP passé. Cependant nous devrions faire :
+````
+ssh-keygen -t ed25519
+````
+
+Placer les clés dans des dossiers adéquates et copier la clé publique sur le poste client. Nous ferions également une gestion des permissions.
+
+Nous devrions relancer le service ssh
+````
+sudo systemctl restart sshd
+````
+
+### 2.2 Filtrage des flux réseaux (Firewall)
+
+Rocky Linux 9 utilise par défaut firewalld, nous devons authoriser le trafic du serveur web apache (https et http), authoriser les connexions ssh et bloquer les flux inutiles :
+````
+sudo firewall-cmd --permanent --add-service=ssh
+sudo firewall-cmd --permanent --add-service=http
+sudo firewall-cmd --permanent --add-service=https
+sudo firewall-cmd --reload
+````
+
+## 3. Installation d’un serveur Web Apache
+
+### 3.1 Installation d’Apache
+
+sudo dnf install -y httpd pour installer Apache nous l'activons avec sudo systemctl enable --now httpd
+
+Par défaut, la page /var/www/html/index.html doit être accessible via http://<adresse-ip> depuis un navigateur.
+
+### 3.2 Vérification de SELinux
+
+Pour s'assurer que SELinux est installer nous pouvons faire la commande sestatus :
+````
+SELinux status:                 enabled
+SELinuxfs mount:                /sys/fs/selinux
+SELinux root directory:         /etc/selinux
+Loaded policy name:             targeted
+Current mode:                   enforcing
+Mode from config file:          enforcing
+Policy MLS status:              enabled
+Policy deny_unknown status:     allowed
+Memory protection checking:     actu
+````
+Si rien de ressemblant ressort de la commande, SELinux n'est pas installé. Nous devrons donc l'installer avec la commande 
+````
+sudo dnf install -y selinux-policy selinux-policy-targeted policycoreutils
+````
+
+Dans mon cas c'était installer (il est très rare de ne pas l'avoir dans les linux basé sur RedHat)
+
+### 3.3 Modes de SELinux et comportement
+
+Enforcing
+SELinux est actif et applique strictement les règles (politique de sécurité). Toute tentative d’accès non conforme à la politique est bloquée et logguée.
+C’est le mode « production » normal.
+
+Permissive
+SELinux est actif, mais n’applique pas les règles de blocage. Il journalise les violations de politique, sans les bloquer.
+C’est le mode « debug/test » : on voit les futurs blocages potentiels sans perturber le fonctionnement.
+
+Disabled
+SELinux est désactivé, aucune politique n’est chargée, aucun blocage ni journalisation SELinux.
+A utiliser pour des tests, par des personnes conscientes des risques.
+
+Comportement si un profil SELinux en “enforce” ne convient pas :
+Si un binaire ou un service a des actions que la politique SELinux ne lui permet pas, alors en mode enforcing, SELinux bloque l’opération. Le service peut échouer “Permission Denied” tant que les contextes ou règles SELinux ne sont pas adaptées.
+
+## 4. Modification d’un profil SELinux pour Apache
+
+### 4.1 Contexte des fichiers du serveur Apache
+
+Par défaut, les fichiers statiques d’Apache (dans /var/www/html) possèdent le contexte SELinux httpd_sys_content_t, nous pouvons le constater en faisant ls -lZ /var/www/html/
+
+### 4.2 Contexte du service Apache
+
+Le service (processus) Apache (httpd) tourne sous le contexte SELinux httpd_t. On peut vérifier en exécutant
+````
+ps -eZ | grep httpd
+````
+### 4.3 Activation du mode enforcing (Apache)
+
+Si en mode permissive, alors :
+````
+sudo setenforce 1
+````
+
+Vérifier dans /etc/selinux/config que SELINUX=enforcing
+
+### 4.4 Déplacer le dossier web dans /srv/srv/srv_1/
+
+Dans /etc/httpd/conf/httpd.conf pour DocumentRoot 
+````
+DocumentRoot "/srv/srv/srv_1"
+<Directory "/srv/srv/srv_1">
+    AllowOverride None
+    Require all granted
+</Directory>
+````
+puis redemarrer (sudo systemctl restart httpd)
+
+### 4.5 Pourquoi le serveur web n’est plus accessible ?
+
+En mode enforcing, SELinux vérifie que le type du répertoire/fichier est httpd_sys_content_t. Or, notre nouveau dossier /srv/srv/srv_1 est labellisé par défaut en var_t.
+Résultat : Apache est bloqué pour lire ce répertoire.
+
+### 4.6 Ajustement du profil SELinux avec sealert
+
+Installation via le paquet setroubleshoot :
+````
+sudo dnf install -y setroubleshoot
+sudo sealert -a /var/log/audit/audit.log
+````
+sealert va analyser les messages d’alerte SELinux et proposer une commande chcon ou semanage fcontext ... && restorecon ... pour corriger les contextes.
+
+#### Définir le contexte via semanage fcontext pour qu’il soit persistant 
+
+sudo semanage fcontext -a -t httpd_sys_content_t "/srv/srv/srv_1(/.*)?"
+
+#### Appliquer la politique par restorecon
+
+sudo restorecon -Rv /srv/srv/srv_1
+
+### 4.7 Vérification
+
+Avec la commande curl http://ip
+````
+<!doctype html>
+<html>
+  <head>
+    <meta charset='utf-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1'>
+    <title>HTTP Server Test Page powered by: Rocky Linux</title>
+    <style type="text/css">
+      /*<![CDATA[*/
+
+      html {
+        height: 100%;
+        width: 100%;
+      }
+        body {
+  background: rgb(20,72,50);
+  background: -moz-linear-gradient(180deg, rgba(23,43,70,1) 30%, rgba(0,0,0,1) 90%)  ;
+  background: -webkit-linear-gradient(180deg, rgba(23,43,70,1) 30%, rgba(0,0,0,1) 90%) ;
+  background: linear-gradient(180deg, rgba(23,43,70,1) 30%, rgba(0,0,0,1) 90%);
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+  filter: progid:DXImageTransform.Microsoft.gradient(startColorstr="#3c6eb4",endColorstr="#3c95b4",GradientType=1);
+        color: white;
+        font-size: 0.9em;
+        font-weight: 400;
+        font-family: 'Montserrat', sans-serif;
+        margin: 0;
+        padding: 10em 6em 10em 6em;
+        box-sizing: border-box;
+
+      }
+
+
+  h1 {
+    text-align: center;
+    margin: 0;
+    padding: 0.6em 2em 0.4em;
+    color: #fff;
+    font-weight: bold;
+    font-family: 'Montserrat', sans-serif;
+    font-size: 2em;
+  }
+  h1 strong {
+    font-weight: bolder;
+    font-family: 'Montserrat', sans-serif;
+  }
+  h2 {
+    font-size: 1.5em;
+    font-weight:bold;
+  }
+
+  .title {
+    border: 1px solid black;
+    font-weight: bold;
+    position: relative;
+    float: right;
+    width: 150px;
+    text-align: center;
+    padding: 10px 0 10px 0;
+    margin-top: 0;
+  }
+
+  .description {
+    padding: 45px 10px 5px 10px;
+    clear: right;
+    padding: 15px;
+  }
+
+  .section {
+    padding-left: 3%;
+   margin-bottom: 10px;
+  }
+
+  img {
+
+    padding: 2px;
+    margin: 2px;
+  }
+  a:hover img {
+    padding: 2px;
+    margin: 2px;
+  }
+
+  :link {
+    color: rgb(199, 252, 77);
+    text-shadow:
+  }
+  :visited {
+    color: rgb(122, 206, 255);
+  }
+  a:hover {
+    color: rgb(16, 44, 122);
+  }
+  .row {
+    width: 100%;
+    padding: 0 10px 0 10px;
+  }
+
+  footer {
+    padding-top: 6em;
+    margin-bottom: 6em;
+    text-align: center;
+    font-size: xx-small;
+    overflow:hidden;
+    clear: both;
+  }
+
+  .summary {
+    font-size: 140%;
+    text-align: center;
+  }
+
+  #rocky-poweredby img {
+    margin-left: -10px;
+  }
+
+  #logos img {
+    vertical-align: top;
+  }
+
+  /* Desktop  View Options */
+
+  @media (min-width: 768px)  {
+
+    body {
+      padding: 10em 20% !important;
+    }
+
+    .col-md-1, .col-md-2, .col-md-3, .col-md-4, .col-md-5, .col-md-6,
+    .col-md-7, .col-md-8, .col-md-9, .col-md-10, .col-md-11, .col-md-12 {
+      float: left;
+    }
+
+    .col-md-1 {
+      width: 8.33%;
+    }
+    .col-md-2 {
+      width: 16.66%;
+    }
+    .col-md-3 {
+      width: 25%;
+    }
+    .col-md-4 {
+      width: 33%;
+    }
+    .col-md-5 {
+      width: 41.66%;
+    }
+    .col-md-6 {
+      border-left:3px ;
+      width: 50%;
+
+
+    }
+    .col-md-7 {
+      width: 58.33%;
+    }
+    .col-md-8 {
+      width: 66.66%;
+    }
+    .col-md-9 {
+      width: 74.99%;
+    }
+    .col-md-10 {
+      width: 83.33%;
+    }
+    .col-md-11 {
+      width: 91.66%;
+    }
+    .col-md-12 {
+      width: 100%;
+    }
+  }
+
+  /* Mobile View Options */
+  @media (max-width: 767px) {
+    .col-sm-1, .col-sm-2, .col-sm-3, .col-sm-4, .col-sm-5, .col-sm-6,
+    .col-sm-7, .col-sm-8, .col-sm-9, .col-sm-10, .col-sm-11, .col-sm-12 {
+      float: left;
+    }
+
+    .col-sm-1 {
+      width: 8.33%;
+    }
+    .col-sm-2 {
+      width: 16.66%;
+    }
+    .col-sm-3 {
+      width: 25%;
+    }
+    .col-sm-4 {
+      width: 33%;
+    }
+    .col-sm-5 {
+      width: 41.66%;
+    }
+    .col-sm-6 {
+      width: 50%;
+    }
+    .col-sm-7 {
+      width: 58.33%;
+    }
+    .col-sm-8 {
+      width: 66.66%;
+    }
+    .col-sm-9 {
+      width: 74.99%;
+    }
+    .col-sm-10 {
+      width: 83.33%;
+    }
+    .col-sm-11 {
+      width: 91.66%;
+    }
+    .col-sm-12 {
+      width: 100%;
+    }
+    h1 {
+      padding: 0 !important;
+    }
+  }
+
+
+  </style>
+  </head>
+  <body>
+    <h1>HTTP Server <strong>Test Page</strong></h1>
+
+    <div class='row'>
+
+      <div class='col-sm-12 col-md-6 col-md-6 '></div>
+          <p class="summary">This page is used to test the proper operation of
+            an HTTP server after it has been installed on a Rocky Linux system.
+            If you can read this page, it means that the software is working
+            correctly.</p>
+      </div>
+
+      <div class='col-sm-12 col-md-6 col-md-6 col-md-offset-12'>
+
+
+        <div class='section'>
+          <h2>Just visiting?</h2>
+
+          <p>This website you are visiting is either experiencing problems or
+          could be going through maintenance.</p>
+
+          <p>If you would like the let the administrators of this website know
+          that you've seen this page instead of the page you've expected, you
+          should send them an email. In general, mail sent to the name
+          "webmaster" and directed to the website's domain should reach the
+          appropriate person.</p>
+
+          <p>The most common email address to send to is:
+          <strong>"webmaster@example.com"</strong></p>
+
+          <h2>Note:</h2>
+          <p>The Rocky Linux distribution is a stable and reproduceable platform
+          based on the sources of Red Hat Enterprise Linux (RHEL). With this in
+          mind, please understand that:
+
+        <ul>
+          <li>Neither the <strong>Rocky Linux Project</strong> nor the
+          <strong>Rocky Enterprise Software Foundation</strong> have anything to
+          do with this website or its content.</li>
+          <li>The Rocky Linux Project nor the <strong>RESF</strong> have
+          "hacked" this webserver: This test page is included with the
+          distribution.</li>
+        </ul>
+        <p>For more information about Rocky Linux, please visit the
+          <a href="https://rockylinux.org/"><strong>Rocky Linux
+          website</strong></a>.
+        </p>
+        </div>
+      </div>
+      <div class='col-sm-12 col-md-6 col-md-6 col-md-offset-12'>
+        <div class='section'>
+
+          <h2>I am the admin, what do I do?</h2>
+
+        <p>You may now add content to the webroot directory for your
+        software.</p>
+
+        <p><strong>For systems using the
+        <a href="https://httpd.apache.org/">Apache Webserver</strong></a>:
+        You can add content to the directory <code>/var/www/html/</code>.
+        Until you do so, people visiting your website will see this page. If
+        you would like this page to not be shown, follow the instructions in:
+        <code>/etc/httpd/conf.d/welcome.conf</code>.</p>
+
+        <p><strong>For systems using
+        <a href="https://nginx.org">Nginx</strong></a>:
+        You can add your content in a location of your
+        choice and edit the <code>root</code> configuration directive
+        in <code>/etc/nginx/nginx.conf</code>.</p>
+
+        <div id="logos">
+          <a href="https://rockylinux.org/" id="rocky-poweredby"><img src="icons/poweredby.png" alt="[ Powered by Rocky Linux ]" /></a> <!-- Rocky -->
+          <img src="poweredby.png" /> <!-- webserver -->
+        </div>
+      </div>
+      </div>
+
+      <footer class="col-sm-12">
+      <a href="https://apache.org">Apache&trade;</a> is a registered trademark of <a href="https://apache.org">the Apache Software Foundation</a> in the United States and/or other countries.<br />
+      <a href="https://nginx.org">NGINX&trade;</a> is a registered trademark of <a href="https://">F5 Networks, Inc.</a>.
+      </footer>
+
+  </body>
+</html>
+[root@localhost ~]# sestatus
+SELinux status:                 enabled
+SELinuxfs mount:                /sys/fs/selinux
+SELinux root directory:         /etc/selinux
+Loaded policy name:             targeted
+Current mode:                   enforcing
+Mode from config file:          enforcing
+Policy MLS status:              enabled
+Policy deny_unknown status:     allowed
+Memory protection checking:     actual (secure)
+Max kernel policy version:      33
+````
+
+## 5. Hardening
+
+A ce stade nous avons répondu aux bonnes pratique de CIS pour le durcicement :
+1. Activer SELinux en mode "enforcing"
+2. Empêcher les modifications au runtime du mode SELinux
+3. Configurer SELinux pour utiliser la politique "targeted"
+4. Auditer les événements SELinux (via audit)
+5. Analyser les violations SELinux régulièrement (grace à setroubleshoot ou audit2why)
+6. Restaurer les contextes SELinux
+7. Ne pas désactiver SELinux pour résoudre des problèmes
+8. Mettre à jour son système régulièrement
